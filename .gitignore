@@ -1,0 +1,12 @@
+# Ignore frontend dependencies and build builds
+frontend/node_modules/
+frontend/dist/
+
+# Ignore backend environment and caching files
+.env
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Ignore local database states
+*.db
