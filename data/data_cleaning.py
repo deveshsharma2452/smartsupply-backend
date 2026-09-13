@@ -1,63 +1,86 @@
 import os
 import pandas as pd
 
+
 def clean_retail_data(input_path, output_path):
-    print("--- Starting Brutal Data Cleaning Pipeline ---")
-    
+    """
+    Cleans the Kaggle "Retail Store Inventory Forecasting Dataset"
+    (https://www.kaggle.com/datasets/anirudhchauhan/retail-store-inventory-forecasting-dataset).
+
+    Unlike the old Online Retail transaction-log dataset, this one is already
+    daily-aggregated (one row per Store + Product + Date), so no groupby
+    aggregation step is needed here — just column renaming, type
+    enforcement, and basic sanity filtering.
+    """
+    print("--- Starting Data Cleaning Pipeline ---")
+
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Raw file not found at: {input_path}")
-        
-    # 1. Load raw transaction records
+
     df = pd.read_csv(input_path)
     initial_rows = len(df)
-    
-    # 2. Enforce strict data types and clean text spaces
-    df['InvoiceDate'] = pd.to_datetime(df['InvoiceDate'])
-    df['StockCode'] = df['StockCode'].astype(str).str.strip()
-    df['InvoiceNo'] = df['InvoiceNo'].astype(str).str.strip()
-    
-    # 3. Handle missing customer entries explicitly
-    df['CustomerID'] = df['CustomerID'].fillna(-1).astype(int)
-    
-    # 4. Remove bad accounting, zero values, and order cancellations
+
+    required_cols = {
+        "Date", "Store ID", "Product ID", "Category",
+        "Inventory Level", "Units Sold", "Price",
+    }
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Input CSV is missing expected column(s): {sorted(missing)}. "
+            f"Found columns: {list(df.columns)}"
+        )
+
+    # 1. Enforce types and clean text fields
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["Product ID"] = df["Product ID"].astype(str).str.strip()
+    df["Store ID"] = df["Store ID"].astype(str).str.strip()
+    df["Category"] = df["Category"].astype(str).str.strip()
+
+    # 2. Drop rows with non-physical values (negative sales/stock, zero/negative price)
     cleaned_df = df[
-        (df['Quantity'] > 0) & 
-        (df['UnitPrice'] > 0) & 
-        (df['UnitPrice'] < 10000) &
-        (~df['InvoiceNo'].str.startswith('C', na=False))
+        (df["Units Sold"] >= 0)
+        & (df["Inventory Level"] >= 0)
+        & (df["Price"] > 0)
     ].copy()
-    
-    # 5. Extract the revenue feature
-    cleaned_df['TotalRevenue'] = cleaned_df['Quantity'] * cleaned_df['UnitPrice']
-    
-    # 6. Compress and group into a daily transactional matrix
-    daily_aggregated = cleaned_df.groupby([
-        cleaned_df['InvoiceDate'].dt.date, 
-        'StockCode', 
-        'Country'
-    ]).agg({
-        'Quantity': 'sum',
-        'TotalRevenue': 'sum',
-        'UnitPrice': 'mean',          
-        'CustomerID': lambda x: (x != -1).sum() 
-    }).reset_index()
-    
-    # Normalize naming convention for database mapping
-    daily_aggregated.rename(columns={'InvoiceDate': 'sales_date'}, inplace=True)
-    daily_aggregated['sales_date'] = pd.to_datetime(daily_aggregated['sales_date'])
-    
-    # 7. Write clean dataset to local storage cache
-    daily_aggregated.to_csv(output_path, index=False)
-    
+
+    # 3. Derived revenue feature
+    cleaned_df["TotalRevenue"] = cleaned_df["Units Sold"] * cleaned_df["Price"]
+
+    # 4. Normalize naming convention for database mapping.
+    # We keep Store-ID-level rows (not aggregated across stores) so the SQL
+    # layer's GROUP BY / SUM logic naturally rolls stores up per SKU, exactly
+    # like the old country-level rows did.
+    cleaned_df = cleaned_df.rename(columns={
+        "Date": "sales_date",
+        "Product ID": "stock_code",
+        "Store ID": "store_id",
+        "Category": "category",
+        "Inventory Level": "inventory_level",
+        "Units Sold": "quantity",
+        "Price": "unit_price",
+        "TotalRevenue": "total_revenue",
+    })
+
+    output_cols = [
+        "sales_date", "stock_code", "store_id", "category",
+        "quantity", "unit_price", "total_revenue", "inventory_level",
+    ]
+    cleaned_df = cleaned_df[output_cols].sort_values("sales_date")
+
+    cleaned_df.to_csv(output_path, index=False)
+
     dropped_rows = initial_rows - len(cleaned_df)
-    print(f"Rows dropped due to anomalies/cancellations: {dropped_rows} ({(dropped_rows/initial_rows)*100:.2f}%)")
-    print(f"Cleaned matrix shape: {daily_aggregated.shape}")
+    print(f"Rows dropped due to invalid values: {dropped_rows} ({(dropped_rows / initial_rows) * 100:.2f}%)")
+    print(f"Cleaned data shape: {cleaned_df.shape}")
     print(f"Cleaned data cached successfully at: {output_path}")
     print("--- Pipeline Execution Complete ---")
 
+
 if __name__ == "__main__":
-    # Adjust paths based on local environment setups if necessary
-    RAW_CSV = "c:/Users/hp/Desktop/SmartSupply/data/online_retail.csv"
-    CLEANED_CSV = "c:/Users/hp/Desktop/SmartSupply/data/online_retail_cleaned.csv"
-    
+    # Paths are relative to this file's location, so this works on any machine/OS.
+    THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+    RAW_CSV = os.path.join(THIS_DIR, "retail_store_inventory.csv")
+    CLEANED_CSV = os.path.join(THIS_DIR, "retail_store_inventory_cleaned.csv")
+
     clean_retail_data(RAW_CSV, CLEANED_CSV)
